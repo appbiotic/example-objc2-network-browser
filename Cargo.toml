@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 block2 = "0.5.1"
 objc2 = "0.5.2"
+tokio = { version = "1.41.0", features = ["full"] }

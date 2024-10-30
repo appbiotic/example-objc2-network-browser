@@ -1,8 +1,10 @@
 #![allow(non_camel_case_types)]
+#![allow(clippy::missing_safety_doc)]
 
 use std::{
     ffi::{self, CString},
-    ptr,
+    process::ExitCode,
+    ptr::{self, NonNull},
 };
 
 use block2::{Block, RcBlock};
@@ -12,6 +14,7 @@ use objc2::{
     runtime::{Bool, NSObjectProtocol, ProtocolObject},
     ProtocolType,
 };
+use tokio::signal;
 
 extern_protocol!(
     pub unsafe trait OS_nw_browse_result: NSObjectProtocol {}
@@ -61,11 +64,16 @@ extern "C" {
 
     pub fn nw_browser_set_browse_results_changed_handler(
         browser: &nw_browser_t,
-        handler: Option<&Block<dyn Fn(&nw_browser_result_t, &nw_browser_result_t, Bool)>>,
+        handler: Option<
+            &Block<dyn Fn(NonNull<nw_browser_result_t>, NonNull<nw_browser_result_t>, Bool)>,
+        >,
     );
+
+    pub fn nw_browser_start(browser: &nw_browser_t);
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> ExitCode {
     println!("Hello, world!");
 
     let service_type = "_tcp._http";
@@ -83,11 +91,39 @@ fn main() {
 
         let browser = Retained::from_raw(nw_browser_create(&browse_descriptor, None)).unwrap();
 
-        let f = |_r1: &nw_browser_result_t, _r2: &nw_browser_result_t, changed: Bool| {
-            println!("changed: {}", changed.as_raw())
-        };
+        let f = |_r1: NonNull<nw_browser_result_t>,
+                 _r2: NonNull<nw_browser_result_t>,
+                 changed: Bool| { println!("changed: {}", changed.as_raw()) };
         let handler = RcBlock::new(f);
 
         nw_browser_set_browse_results_changed_handler(&browser, Some(&handler));
+
+        nw_browser_start(&browser);
+    }
+
+    println!("Waiting for events...");
+
+    shutdown_signal().await;
+
+    ExitCode::SUCCESS
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async { signal::ctrl_c().await.unwrap() };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .unwrap()
+            .recv()
+            .await
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
 }
