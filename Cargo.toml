@@ -1,0 +1,8 @@
+[package]
+name = "example-objc2-network-browser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+block2 = "0.5.1"
+objc2 = "0.5.2"
