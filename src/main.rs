@@ -2,12 +2,19 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::{
-    ffi::{self, CString},
+    ffi::{self, CStr, CString},
     process::ExitCode,
     ptr::{self, NonNull},
 };
 
 use block2::{Block, RcBlock};
+use dispatch::{
+    ffi::{
+        dispatch_get_global_queue, dispatch_get_main_queue, dispatch_queue_t,
+        DISPATCH_QUEUE_PRIORITY_DEFAULT,
+    },
+    Queue, QueuePriority,
+};
 use objc2::{
     extern_protocol,
     rc::Retained,
@@ -48,6 +55,8 @@ pub type nw_browse_descriptor_t = ProtocolObject<dyn OS_nw_browse_descriptor>;
 
 #[link(name = "Network", kind = "framework")]
 extern "C" {
+    pub fn nw_browse_result_copy_endpoint(result: &nw_browser_result_t) -> *mut nw_endpoint_t;
+
     pub fn nw_browse_descriptor_create_application_service(
         application_service_name: *const ffi::c_char,
     ) -> *mut nw_browse_descriptor_t;
@@ -69,14 +78,18 @@ extern "C" {
         >,
     );
 
+    pub fn nw_browser_set_queue(browser: &nw_browser_t, queue: dispatch_queue_t);
+
     pub fn nw_browser_start(browser: &nw_browser_t);
+
+    pub fn nw_endpoint_get_bonjour_service_name(endpoint: &nw_endpoint_t) -> *const ffi::c_char;
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
     println!("Hello, world!");
 
-    let service_type = "_tcp._http";
+    let service_type = "_http._tcp";
     let domain: Option<&str> = None;
 
     unsafe {
@@ -91,12 +104,33 @@ async fn main() -> ExitCode {
 
         let browser = Retained::from_raw(nw_browser_create(&browse_descriptor, None)).unwrap();
 
-        let f = |_r1: NonNull<nw_browser_result_t>,
-                 _r2: NonNull<nw_browser_result_t>,
-                 changed: Bool| { println!("changed: {}", changed.as_raw()) };
+        // FIXME: These may be null.
+        let f = |_r2: NonNull<nw_browser_result_t>,
+                 r1: NonNull<nw_browser_result_t>,
+                 no_more: Bool| {
+            let r1_endpoint =
+                Retained::from_raw(nw_browse_result_copy_endpoint(r1.as_ref())).unwrap();
+            let r1_endpoint_bonjour_service_name =
+                nw_endpoint_get_bonjour_service_name(&r1_endpoint);
+            let r1_endpoint_bonjour_service_name = if !r1_endpoint_bonjour_service_name.is_null() {
+                CStr::from_ptr(r1_endpoint_bonjour_service_name)
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                String::from("[NULL]")
+            };
+
+            println!(
+                "bonjour_service_name: {r1_endpoint_bonjour_service_name}, no_more: {}",
+                no_more.as_raw()
+            );
+        };
         let handler = RcBlock::new(f);
 
         nw_browser_set_browse_results_changed_handler(&browser, Some(&handler));
+
+        let queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+        nw_browser_set_queue(&browser, queue);
 
         nw_browser_start(&browser);
     }
