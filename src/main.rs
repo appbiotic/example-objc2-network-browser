@@ -8,13 +8,7 @@ use std::{
 };
 
 use block2::{Block, RcBlock};
-use dispatch::{
-    ffi::{
-        dispatch_get_global_queue, dispatch_get_main_queue, dispatch_queue_t,
-        DISPATCH_QUEUE_PRIORITY_DEFAULT,
-    },
-    Queue, QueuePriority,
-};
+use dispatch::ffi::{dispatch_get_global_queue, dispatch_queue_t, DISPATCH_QUEUE_PRIORITY_DEFAULT};
 use objc2::{
     extern_protocol,
     rc::Retained,
@@ -74,7 +68,7 @@ extern "C" {
     pub fn nw_browser_set_browse_results_changed_handler(
         browser: &nw_browser_t,
         handler: Option<
-            &Block<dyn Fn(NonNull<nw_browser_result_t>, NonNull<nw_browser_result_t>, Bool)>,
+            &Block<dyn Fn(*mut nw_browser_result_t, NonNull<nw_browser_result_t>, Bool)>,
         >,
     );
 
@@ -82,15 +76,29 @@ extern "C" {
 
     pub fn nw_browser_start(browser: &nw_browser_t);
 
+    pub fn nw_endpoint_get_bonjour_service_domain(endpoint: &nw_endpoint_t) -> *const ffi::c_char;
+
     pub fn nw_endpoint_get_bonjour_service_name(endpoint: &nw_endpoint_t) -> *const ffi::c_char;
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    println!("Hello, world!");
+unsafe fn string_from_raw_or_default(raw_ptr: *const ffi::c_char) -> String {
+    if !raw_ptr.is_null() {
+        CStr::from_ptr(raw_ptr).to_string_lossy().to_string()
+    } else {
+        String::from("[NULL]")
+    }
+}
 
+#[tokio::main]
+#[allow(clippy::unnecessary_literal_unwrap)]
+async fn main() -> ExitCode {
     let service_type = "_http._tcp";
     let domain: Option<&str> = None;
+
+    println!(
+        "Browsing with service_type `{service_type}` domain: `{}`",
+        domain.unwrap_or_default()
+    );
 
     unsafe {
         let service_type_ = CString::new(service_type).unwrap();
@@ -104,26 +112,20 @@ async fn main() -> ExitCode {
 
         let browser = Retained::from_raw(nw_browser_create(&browse_descriptor, None)).unwrap();
 
-        // FIXME: These may be null.
-        let f = |_r2: NonNull<nw_browser_result_t>,
-                 r1: NonNull<nw_browser_result_t>,
+        let f = |_prev: *mut nw_browser_result_t,
+                 curr: NonNull<nw_browser_result_t>,
                  no_more: Bool| {
-            let r1_endpoint =
-                Retained::from_raw(nw_browse_result_copy_endpoint(r1.as_ref())).unwrap();
-            let r1_endpoint_bonjour_service_name =
-                nw_endpoint_get_bonjour_service_name(&r1_endpoint);
-            let r1_endpoint_bonjour_service_name = if !r1_endpoint_bonjour_service_name.is_null() {
-                CStr::from_ptr(r1_endpoint_bonjour_service_name)
-                    .to_string_lossy()
-                    .to_string()
-            } else {
-                String::from("[NULL]")
-            };
+            let cur_endpoint =
+                Retained::from_raw(nw_browse_result_copy_endpoint(curr.as_ref())).unwrap();
+            let cur_endpoint_bonjour_service_name =
+                string_from_raw_or_default(nw_endpoint_get_bonjour_service_name(&cur_endpoint));
+            let cur_endpoint_bonjour_service_domain =
+                string_from_raw_or_default(nw_endpoint_get_bonjour_service_domain(&cur_endpoint));
 
             println!(
-                "bonjour_service_name: {r1_endpoint_bonjour_service_name}, no_more: {}",
-                no_more.as_raw()
-            );
+                    "Event for service `{cur_endpoint_bonjour_service_name}` domain `{cur_endpoint_bonjour_service_domain}` expect more `{}`",
+                    !no_more.as_raw()
+                );
         };
         let handler = RcBlock::new(f);
 
@@ -135,9 +137,11 @@ async fn main() -> ExitCode {
         nw_browser_start(&browser);
     }
 
-    println!("Waiting for events...");
+    println!("Browsing...");
 
     shutdown_signal().await;
+
+    println!("Shutting down");
 
     ExitCode::SUCCESS
 }
