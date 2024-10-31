@@ -21,7 +21,8 @@ extern_protocol!(
     pub unsafe trait OS_nw_browse_result: NSObjectProtocol {}
     unsafe impl ProtocolType for dyn OS_nw_browse_result {}
 );
-pub type nw_browser_result_t = ProtocolObject<dyn OS_nw_browse_result>;
+
+pub type nw_browse_result_t = ProtocolObject<dyn OS_nw_browse_result>;
 
 extern_protocol!(
     pub unsafe trait OS_nw_browser: NSObjectProtocol {}
@@ -47,9 +48,21 @@ extern_protocol!(
 );
 pub type nw_browse_descriptor_t = ProtocolObject<dyn OS_nw_browse_descriptor>;
 
+pub type nw_browse_result_change_t = u64;
+
+// TODO: source values from bindgen
+#[repr(u64)]
+#[derive(Debug, PartialEq, int_enum::IntEnum, strum::IntoStaticStr)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
+pub enum BrowseResultChange {
+    Added = 2,
+    Removed = 4,
+}
+
 #[link(name = "Network", kind = "framework")]
 extern "C" {
-    pub fn nw_browse_result_copy_endpoint(result: &nw_browser_result_t) -> *mut nw_endpoint_t;
+    pub fn nw_browse_result_copy_endpoint(result: &nw_browse_result_t) -> *mut nw_endpoint_t;
 
     pub fn nw_browse_descriptor_create_application_service(
         application_service_name: *const ffi::c_char,
@@ -68,7 +81,13 @@ extern "C" {
     pub fn nw_browser_set_browse_results_changed_handler(
         browser: &nw_browser_t,
         handler: Option<
-            &Block<dyn Fn(*mut nw_browser_result_t, NonNull<nw_browser_result_t>, Bool)>,
+            &Block<
+                dyn Fn(
+                    Option<NonNull<nw_browse_result_t>>,
+                    Option<NonNull<nw_browse_result_t>>,
+                    Bool,
+                ),
+            >,
         >,
     );
 
@@ -79,6 +98,11 @@ extern "C" {
     pub fn nw_endpoint_get_bonjour_service_domain(endpoint: &nw_endpoint_t) -> *const ffi::c_char;
 
     pub fn nw_endpoint_get_bonjour_service_name(endpoint: &nw_endpoint_t) -> *const ffi::c_char;
+
+    pub fn nw_browse_result_get_changes(
+        old_result: Option<NonNull<nw_browse_result_t>>,
+        new_result: Option<NonNull<nw_browse_result_t>>,
+    ) -> nw_browse_result_change_t;
 }
 
 unsafe fn string_from_raw_or_default(raw_ptr: *const ffi::c_char) -> String {
@@ -112,20 +136,20 @@ async fn main() -> ExitCode {
 
         let browser = Retained::from_raw(nw_browser_create(&browse_descriptor, None)).unwrap();
 
-        let f = |_prev: *mut nw_browser_result_t,
-                 curr: NonNull<nw_browser_result_t>,
+        let f = |old_result: Option<NonNull<nw_browse_result_t>>,
+                 new_result: Option<NonNull<nw_browse_result_t>>,
                  no_more: Bool| {
-            let cur_endpoint =
-                Retained::from_raw(nw_browse_result_copy_endpoint(curr.as_ref())).unwrap();
-            let cur_endpoint_bonjour_service_name =
-                string_from_raw_or_default(nw_endpoint_get_bonjour_service_name(&cur_endpoint));
-            let cur_endpoint_bonjour_service_domain =
-                string_from_raw_or_default(nw_endpoint_get_bonjour_service_domain(&cur_endpoint));
-
-            println!(
-                    "Event for service `{cur_endpoint_bonjour_service_name}` domain `{cur_endpoint_bonjour_service_domain}` expect more `{}`",
-                    !no_more.as_raw()
-                );
+            let change: &'static str =
+                BrowseResultChange::try_from(nw_browse_result_get_changes(old_result, new_result))
+                    .map(|x| x.into())
+                    .unwrap_or("unknown");
+            println!("---- Browser Event, change: {change}");
+            if let Some(result) = old_result {
+                print_result("Old", result, no_more);
+            }
+            if let Some(result) = new_result {
+                print_result("New", result, no_more);
+            }
         };
         let handler = RcBlock::new(f);
 
@@ -144,6 +168,17 @@ async fn main() -> ExitCode {
     println!("Shutting down");
 
     ExitCode::SUCCESS
+}
+
+unsafe fn print_result(context: &str, result: NonNull<nw_browse_result_t>, no_more: Bool) {
+    let endpoint = Retained::from_raw(nw_browse_result_copy_endpoint(result.as_ref())).unwrap();
+    let service_name = string_from_raw_or_default(nw_endpoint_get_bonjour_service_name(&endpoint));
+    let service_domain =
+        string_from_raw_or_default(nw_endpoint_get_bonjour_service_domain(&endpoint));
+    println!(
+        "{context}: service `{service_name}` domain `{service_domain}` expect more `{}`",
+        !no_more.as_raw()
+    );
 }
 
 async fn shutdown_signal() {
